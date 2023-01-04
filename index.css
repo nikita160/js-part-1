@@ -4,3 +4,31 @@ body {
 .mui-btn {
     transition: none;
 }
+
+ul {
+    margin-top: 2em;
+    padding: 0;
+    list-style-type: none;
+}
+
+.errorMessage {
+    background-color: #ffcccc;
+    border: solid 2px #ff4d4d;
+    color: #ff4d4d;
+    min-height: 4em;
+    margin: 1em 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.message {
+    background-color: #ffffcc;
+    border: solid 2px #d2a679;
+    color: #654a2f;
+    min-height: 4em;
+    margin: 1em 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
