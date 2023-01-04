@@ -56,7 +56,7 @@ const output = document.getElementById('output');
         // TODO: Вывести маршрут и общее количество запросов.
         api.resetRequestCount();
         renderPendingMessage(fromCountry.value, toCountry.value);
-        calculateRoute(fromCountry.value, toCountry.value, api).then(renderResult).then(makeElementsEnabled);
+        calculateRoute(fromCountry.value, toCountry.value, api).then(renderResult).then(setElementsEnabled);
     });
 })();
 
@@ -157,32 +157,37 @@ function SingleCountryAPI() {
         return countries.map((country) => country.name);
     };
 
-    // Загружаем коды стран, потенциально доступных из заданной
-    this.getRelatedCountriesByCode = async (code) => {
+    // Метод обходит страны которые понадобятся при поиске маршрута, если конечная точка недостижима, то null
+    this.getRelatedCountriesByCodes = async (fromCountryCode, toCountryCode, maxDistance = Infinity) => {
         const visited = [];
-        const walk = async (code) => {
+        let isDestinationVisited = false;
+        const walk = async (code, distance) => {
+            if (distance >= maxDistance) {
+                return;
+            }
             const borders = await this.getCountryBordersByCode(code);
+
+            if (borders.includes(toCountryCode)) {
+                maxDistance = distance;
+                if (!isDestinationVisited) {
+                    visited.push(toCountryCode);
+                    isDestinationVisited = true;
+                }
+                return;
+            }
+
             await Promise.all(
                 borders
                     .filter((border) => !visited.includes(border))
                     .map((border) => {
                         visited.push(border);
-                        return walk(border);
+                        return walk(border, distance + 1);
                     })
             );
         };
-        await walk(code);
-        return visited;
-    };
+        await walk(fromCountryCode, 0);
 
-    // Для удобства функция, возвращающая обеъект {cca3: [borders]} принимающая массив [cca3]
-    this.getCodesToBordersObj = async (codes) => {
-        const countries = await this.getCountriesArrayByCodes(codes);
-
-        return countries.reduce((result, country) => {
-            result[country.cca3] = country.borders;
-            return result;
-        }, {});
+        return isDestinationVisited ? this.getCountriesArrayByCodes(visited) : null;
     };
 
     this.getRequestCount = () => {
@@ -213,18 +218,24 @@ async function calculateRoute(fromCountry, toCountry, api) {
 
     let hasSolution = false;
 
-    const routes = [];
+    const routesCodes = [];
+    let routesNames = [];
 
     const buildErrorMessage = (error, addedMessage) => {
         return `Something went wrong. ${error}. ${addedMessage}`;
     };
 
     try {
-        fromCountryCode = await api.getCountryCodeByName(fromCountry);
-        toCountryCode = await api.getCountryCodeByName(toCountry);
+        const [fromCountryData, toCountryData] = await Promise.all([
+            api.getCountryByName(fromCountry),
+            api.getCountryByName(toCountry),
+        ]);
 
-        fromCountryBorders = await api.getCountryBordersByCode(fromCountryCode);
-        toCountryBorders = await api.getCountryBordersByCode(toCountryCode);
+        fromCountryCode = fromCountryData.cca3;
+        toCountryCode = toCountryData.cca3;
+
+        fromCountryBorders = fromCountryData.borders;
+        toCountryBorders = toCountryData.borders;
     } catch (error) {
         console.error(error);
         return {
@@ -242,43 +253,46 @@ async function calculateRoute(fromCountry, toCountry, api) {
 
     // Оптимизация для случая, когда начальная и конечная страны граничат
     if (fromCountryBorders.includes(toCountryCode)) {
-        routes.push([toCountryCode, fromCountryCode]);
+        routesNames.push([fromCountry, toCountry]);
         hasSolution = true;
     }
 
     // Если из прошлых условий ничего не выполнилось, загружаем расширенные данные
     let relatedCountries;
-    let bordersByCode;
 
     if (!hasSolution) {
         try {
-            relatedCountries = await api.getRelatedCountriesByCode(fromCountryCode);
-            bordersByCode = await api.getCodesToBordersObj(relatedCountries);
+            relatedCountries = await api.getRelatedCountriesByCodes(fromCountryCode, toCountryCode, maxDistance);
         } catch (error) {
             return { errorMessage: buildErrorMessage(error) };
         }
 
         // Теперь мы можем проверить, доступен ли в принципе сухопутный маршрут
-
-        if (!relatedCountries.includes(toCountryCode)) {
+        if (!relatedCountries) {
             return {
-                message: 'Route is not possible, countries belog defferent continents!',
+                message: 'Route is not possible! Route is too long or countries belong defferent continents!',
                 requestCount: api.getRequestCount().toString(),
             };
         }
     }
 
-    // И далее вычисляем оптимальные маршруты, используя алгоритм Дейкстры(или что-то по мотивам:) )
+    // И далее вычисляем оптимальные маршруты, используя алгоритм Дейкстры(или что-то по мотивам)
 
     // Здесь хранится для каждой страны предшественники,
     // через которые лежат кратчайшие расстояния до старта
     const parents = {};
 
     function bfs() {
+        // Для удобства объект, хранящий границы стран по их коду
+        const bordersByCodeObj = relatedCountries.reduce((result, country) => {
+            result[country.cca3] = country.borders;
+            return result;
+        }, {});
+
         // Здесь будут расстояния от каждой страны до текущей
         const dist = {};
 
-        for (const key in bordersByCode) {
+        for (const key in bordersByCodeObj) {
             dist[key] = Infinity;
         }
 
@@ -290,7 +304,7 @@ async function calculateRoute(fromCountry, toCountry, api) {
         while (queue.length > 0) {
             const currentCountryCode = queue.shift();
 
-            const borders = bordersByCode[currentCountryCode];
+            const borders = bordersByCodeObj[currentCountryCode];
 
             for (const borderCountryCode of borders) {
                 if (dist[borderCountryCode] > dist[currentCountryCode] + 1) {
@@ -308,7 +322,7 @@ async function calculateRoute(fromCountry, toCountry, api) {
 
     function findOptimalRoutes(route = [], countryCode = toCountryCode) {
         if (countryCode === null) {
-            routes.push([...route]);
+            routesCodes.push([...route]);
             return;
         }
 
@@ -319,25 +333,22 @@ async function calculateRoute(fromCountry, toCountry, api) {
         }
     }
 
-    let routesNames = [];
-
     if (!hasSolution) {
         bfs();
         findOptimalRoutes();
-        if (routes.length > 0 && routes.length <= maxDistance) {
-            routes.map((route) => route.reverse());
+        if (routesCodes.length > 0 && routesCodes.length <= maxDistance) {
+            routesCodes.map((route) => route.reverse());
             hasSolution = true;
         }
+
+        routesNames = routesCodes.map((route) =>
+            route.map((code) => {
+                const country = relatedCountries.find((country) => country.cca3 === code);
+                return country.name;
+            })
+        );
     }
 
-    try {
-        const promises = [];
-        routes.forEach((route) => promises.push(api.getCountriesNamesArrayByCodes(route)));
-        routesNames = await Promise.all(promises);
-    } catch (error) {
-        console.error(error);
-        return { errorMessage: buildErrorMessage(error) };
-    }
     return {
         routes: hasSolution ? routesNames : null,
         requestCount: api.getRequestCount().toString(),
@@ -374,17 +385,17 @@ function renderResult(data) {
 }
 
 function renderPendingMessage(from, to) {
-    makeElementsDisbled();
+    setElementsDisabled();
     output.textContent = `Calculation of shortest routes from ${from} to ${to} in progress…`;
 }
 
-function makeElementsDisbled() {
+function setElementsDisabled() {
     fromCountry.disabled = true;
     toCountry.disabled = true;
     submit.disabled = true;
 }
 
-function makeElementsEnabled() {
+function setElementsEnabled() {
     fromCountry.disabled = false;
     toCountry.disabled = false;
     submit.disabled = false;
